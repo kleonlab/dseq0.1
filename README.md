@@ -13,3 +13,5 @@ After the csv downloads, run the setup file in dataload to get the clean and usa
 ## use this to get the data from replog - wget -O "datasets/k562.h5ad" "https://ndownloader.figshare.com/files/35774440" 
 
 then run the train with the file path location. 
+
+run the download_evo, se series to get all the models and their weights when needed.

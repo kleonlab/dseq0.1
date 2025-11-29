@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
     "pandas",
     "requests",
+    "huggingface_hub",
 ]
 
 [tool.setuptools.packages.find]
