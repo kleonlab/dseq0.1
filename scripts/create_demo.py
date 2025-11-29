@@ -4,9 +4,9 @@ import numpy as np
 
 # Make sure you have anndata installed: pip install anndata
 
-file_path = "datasets/k562.h5ad"
-output_path = "datasets/k562_500k.h5ad"
-target_n_cells = 50000
+file_path = "datasets/k562_500k.h5ad"
+output_path = "datasets/k562_5k.h5ad"
+target_n_cells = 5000
 
 # Load the entire AnnData object
 # NOTE: This requires significant RAM (~128 GB is often recommended for 61 GB H5AD files)
