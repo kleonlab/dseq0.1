@@ -100,7 +100,7 @@ if __name__ == "__main__":
     # Configuration
     CSV_PATH = 'datasets/DatabaseExtract_v_1.01.csv'
     OUTPUT_FILE = 'gene_sequences.fasta'
-    ID_COLUMN = 'gene_id' # We determined this is the correct column earlier
+    ID_COLUMN = 'Ensembl ID' # We determined this is the correct column earlier
     
     if os.path.exists(CSV_PATH):
         print(f"Reading IDs from {CSV_PATH}...")
@@ -113,10 +113,10 @@ if __name__ == "__main__":
                 
                 # Fetch sequences
                 print("Starting bulk retrieval...")
-                sequences = get_gene_sequences_bulk(id_list, seq_type='genomic')
+                sequences = get_gene_sequences_bulk(id_list, seq_type='cds')
                 
                 # Ensure output directory exists
-                output_dir = "assets/gene_sequences"
+                output_dir = "datasets/gene_sequences"
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                 
@@ -140,7 +140,7 @@ if __name__ == "__main__":
         print(sequences.keys())
 
         # Ensure output directory exists
-        output_dir = "assets/gene_sequences"
+        output_dir = "datasets/gene_sequences"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         

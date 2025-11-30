@@ -6,6 +6,7 @@ import os
 import sys
 import scanpy as sc
 import subprocess
+import numpy as np
 
 # Configuration
 MODEL_FOLDER = "/home/b5cc/sanjukta.b5cc/dseq0.1/models/se600m"
@@ -62,23 +63,59 @@ def generate_embeddings(input_file, output_file=None):
     print(f"   Observations (cells): {adata.n_obs}")
     print(f"   Variables (genes): {adata.n_vars}")
     
+    # Check for NaNs in X and fix if needed
+    if hasattr(adata.X, 'toarray'):
+        is_nan = np.isnan(adata.X.data).any()
+    else:
+        is_nan = np.isnan(adata.X).any()
+        
+    actual_input_file = input_file
+    temp_file = None
+    
+    if is_nan:
+        print(f"\n⚠️  Warning: NaN values found in adata.X. Replacing with 0...")
+        if hasattr(adata.X, 'toarray'):
+            # Sparse matrix
+            adata.X.data = np.nan_to_num(adata.X.data, nan=0.0)
+        else:
+            # Dense array
+            adata.X = np.nan_to_num(adata.X, nan=0.0)
+            
+        # Save to temporary file
+        temp_file = input_file.replace('.h5ad', '_cleaned_temp.h5ad')
+        print(f"   Saving cleaned data to temporary file: {temp_file}")
+        adata.write_h5ad(temp_file)
+        actual_input_file = temp_file
+
     # Generate embeddings using the state CLI
     print(f"\n🚀 Generating embeddings using SE-600M model...")
     print(f"   Model: {MODEL_FOLDER}")
     print(f"   Checkpoint: {os.path.basename(CHECKPOINT_PATH)}")
     
     try:
+        # Set environment variables to prevent OpenBLAS threading issues
+        env = os.environ.copy()
+        env['OPENBLAS_NUM_THREADS'] = '1'
+        env['MKL_NUM_THREADS'] = '1'
+        env['OMP_NUM_THREADS'] = '1'
+        
         cmd = [
             "state", "emb", "transform",
             "--model-folder", MODEL_FOLDER,
             "--checkpoint", CHECKPOINT_PATH,
-            "--input", input_file,
+            "--input", actual_input_file,
             "--output", output_file
         ]
         
         print(f"\n   Running command: {' '.join(cmd)}")
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"   (with OPENBLAS_NUM_THREADS=1 to prevent crashes)")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
         print(result.stdout)
+        
+        # Clean up temp file
+        if temp_file and os.path.exists(temp_file):
+            print(f"   Removing temporary file: {temp_file}")
+            os.remove(temp_file)
         
         print(f"\n✅ Successfully generated embeddings!")
         print(f"   Output saved to: {output_file}")
@@ -110,7 +147,7 @@ def main():
     """
     # Default input files
     input_files = [
-        os.path.join(INPUT_DIR, "k562_500k.h5ad"),
+        os.path.join(INPUT_DIR, "k562_5k.h5ad"),
         # Add more files here if needed
         # os.path.join(INPUT_DIR, "k562_500k.h5ad"),
     ]
