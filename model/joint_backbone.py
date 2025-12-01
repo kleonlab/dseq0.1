@@ -66,12 +66,13 @@ class DNALanguageModel(nn.Module):
     A Transformer-based Language Model that generates DNA sequences 
     conditioned on a 'delta' vector representing cell state change.
     """
-    def __init__(self, vocab_size=5, hidden_dim=512, num_layers=12, seq_len=1000):
+    def __init__(self, vocab_size=5, hidden_dim=512, num_layers=12, seq_len=1000, input_dim=768):
         """
         vocab_size: Number of DNA bases (usually 4: A, C, G, T) + padding/special if needed.
                     Let's assume 4 bases + 1 special or just 4 outputs.
                     Output shape per position will be 4.
         hidden_dim: Dimension of the transformer embedding.
+        input_dim: Dimension of the input 'delta' vector (cell embedding dimension).
         """
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -83,7 +84,7 @@ class DNALanguageModel(nn.Module):
         # If delta vector size is unknown, we might need an input_dim param.
         # For now, assuming delta is projected or matches hidden_dim before entering or we have a projection.
         # Let's add a projection for flexibility.
-        self.delta_projection = nn.Linear(768, hidden_dim) # Assuming cell embedding dim is 768
+        self.delta_projection = nn.Linear(input_dim, hidden_dim) # Assuming cell embedding dim is input_dim
         
         # Positional Encoding (Learnable or Sinusoidal)
         self.pos_embedding = nn.Parameter(torch.randn(1, seq_len, hidden_dim))
@@ -172,6 +173,10 @@ class VirtualCell(nn.Module):
         self.dna_encoder = nn.Linear(seq_len * 4, 256)
         
         # Hypernetwork to generate transformation matrix M
+        # Warning: cell_dim can be large (e.g., 8248), making the output layer huge.
+        # (8248 * 64) * 2 ~= 1 million outputs. 
+        # A 256 -> 1M linear layer is large but feasible (256MB weights).
+        # If cell_dim is extremely large, we might need a more efficient factorization.
         self.hyper_net = nn.Sequential(
             nn.ReLU(),
             nn.Linear(256, (cell_dim * 64) * 2) # Low Rank (rank=64)

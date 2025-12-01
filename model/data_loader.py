@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-def prepare_split(df, min_cells=0, max_cells_train=2000):
+def prepare_split_old(df, min_cells=0, max_cells_train=2000):
     # 1. Remove the "Tail" (Too noisy)
     df_clean = df[df['Cell Count'] >= min_cells].copy()
     print(f"Dropped {len(df) - len(df_clean)} genes due to low cell counts.")
@@ -99,13 +99,17 @@ class PerturbationDataset(Dataset):
         self.transform = transform
         
         # Store control pool for sampling
-        if control_indices is not None:
+        if control_indices is not None and len(control_indices) > 0:
             self.control_pool = self.data[control_indices]
         else:
             # If no specific controls provided, we might calculate a global mean 
             # or expect the user to handle this differently. 
             # Here we default to using the global mean as a static control if pool is missing.
-            self.control_pool = self.data.mean(dim=0).unsqueeze(0)
+            if len(self.data) > 0:
+                self.control_pool = self.data.mean(dim=0).unsqueeze(0)
+            else:
+                # Edge case: empty dataset
+                self.control_pool = torch.zeros((1, self.data.shape[1])) if self.data.shape[1] > 0 else torch.zeros((1, 1))
 
     def __len__(self):
         return len(self.data)
