@@ -12,7 +12,7 @@ from model.joint_backbone import DNALanguageModel, VirtualCell
 from model.utils import gumbel_softmax, steering_loss
 from model.tokenize_seq import decode_seq
 
-from model.metrics import GENEMetrics
+from model.metric import GENEMetrics
 
 def optimize_sequence(dna_model, vc_model, control, target, steps=50, lr=0.1, device='cuda'):
     """
