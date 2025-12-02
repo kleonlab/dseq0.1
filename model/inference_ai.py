@@ -9,90 +9,116 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from model.joint_backbone import DNALanguageModel, VirtualCell
-from model.utils import gumbel_softmax, steering_loss
+from model.utils import gumbel_softmax
 from model.tokenize_seq import decode_seq
-
 from model.metric import GENEMetrics
 
-def optimize_sequence(dna_model, vc_model, control, target, steps=50, lr=0.1, device='cuda'):
+# --- SAFETY FIX 1: Define Robust Loss Locally ---
+def robust_steering_loss(pred, target):
     """
-    Generates a novel sequence for a specific problem without changing model weights.
-    Optimizes the logits directly.
+    Calculates 1 - CosineSimilarity with NaN protection.
+    """
+    # eps=1e-8 prevents division by zero if pred is a zero-vector
+    cosine_sim = torch.nn.functional.cosine_similarity(pred, target, dim=-1, eps=1e-8)
     
-    Parameters:
-    -----------
-    dna_model : DNALanguageModel
-        The trained generator (used for initial guess).
-    vc_model : VirtualCell
-        The frozen simulator.
-    control : torch.Tensor
-        Control cell state (1, Cell_Dim).
-    target : torch.Tensor
-        Target cell state (1, Cell_Dim).
-    steps : int
-        Number of optimization steps.
+    # Check for NaNs immediately
+    if torch.isnan(cosine_sim).any():
+        return None
         
-    Returns:
-    --------
-    str
-        The optimized DNA sequence string.
+    # Return scalar loss
+    return 1 - cosine_sim.mean()
+
+def optimize_sequence(dna_model, vc_model, control, target, steps=50, lr=0.05, device='cuda'):
     """
-    # Ensure models are in eval mode (though we don't update their weights)
+    Generates a novel sequence by optimizing logits directly.
+    """
     dna_model.eval()
     vc_model.eval()
     
-    # Compute delta (The prompt)
     delta = target - control
     
-    # Step 1 (Initialize): Get initial guess from DNA-LM
+    # Step 1: Initial Guess from Model
     with torch.no_grad():
         logits_init = dna_model(delta)
         
-    # Detach and clone to create the tensor we will optimize
-    # We optimize the logits directly, starting from the model's best guess
+    # --- SAFETY FIX 5: Check for Corrupted Model Weights ---
+    # If the previous training run crashed with NaNs, the saved checkpoint 
+    # likely generates NaNs immediately. We must detect and fix this.
+    if torch.isnan(logits_init).any() or torch.isinf(logits_init).any():
+        print("!!! WARNING: DNA Model produced NaN logits. The checkpoint weights are likely corrupted.")
+        print("!!! Falling back to RANDOM INITIALIZATION to allow optimization to proceed.")
+        # Initialize with small random noise instead of broken model output
+        logits_init = torch.randn_like(logits_init) * 0.1
+
+    # Clone and Detach for Optimization
     logits_curr = logits_init.detach().clone()
     logits_curr.requires_grad = True
     
-    # Define optimizer for the logits
-    # SGD is often used for this kind of "latent space" or "input" optimization
-    logit_optimizer = optim.SGD([logits_curr], lr=lr)
+    # --- SAFETY FIX 2: Use Adam ---
+    logit_optimizer = optim.Adam([logits_curr], lr=lr)
     
     print(f"Starting optimization for {steps} steps...")
     
-    # Step 2 (The Loop)
+    best_loss = float('inf')
+    best_logits = logits_curr.detach().clone()
+    
     for i in range(steps):
         logit_optimizer.zero_grad()
         
-        # Forward pass: Logits -> Soft Sequence -> Virtual Cell -> Predicted State
+        # Forward Pass
+        # hard=True sends discrete-like DNA to VC, but keeps gradients soft
         soft_seq = gumbel_softmax(logits_curr, temperature=1.0, hard=True)
+        
+        # Check if Gumbel produced NaNs (rare but possible if logits exploded)
+        if torch.isnan(soft_seq).any():
+            print(f"  Step {i+1}: Gumbel output NaN. Reinitializing logits.")
+            logits_curr.data = torch.randn_like(logits_curr) * 0.1
+            continue
+
         pred = vc_model(control, soft_seq)
         
-        # Calculate loss
-        loss = steering_loss(pred, target)
+        # Check VC output
+        if torch.isnan(pred).any():
+            print(f"  Step {i+1}: Virtual Cell predicted NaN. Skipping step.")
+            # If VC is unstable, we can't step. Just continue or break.
+            break
+
+        # Calculate Safe Loss
+        loss = robust_steering_loss(pred, target)
         
-        # Backward pass (Gradients flow to logits_curr)
+        # --- SAFETY FIX 3: NaN Brake ---
+        if loss is None or torch.isnan(loss):
+            print(f"  Step {i+1}: Loss is NaN! Reverting to previous best and stopping.")
+            logits_curr.data = best_logits.data
+            break
+            
+        # Keep track of best result
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_logits = logits_curr.detach().clone()
+            
         loss.backward()
         
-        # Update logits
+        # --- SAFETY FIX 4: Gradient Clipping ---
+        torch.nn.utils.clip_grad_norm_([logits_curr], max_norm=1.0)
+        
         logit_optimizer.step()
         
         if (i + 1) % 10 == 0:
             print(f"  Step {i+1}/{steps}, Loss: {loss.item():.4f}")
             
-    # Step 3 (Finalize): Decode the optimized logits
-    # Take argmax to get discrete tokens
-    final_tokens = logits_curr.argmax(dim=-1).squeeze(0) # Shape: (SeqLen,)
+    # Final Decode
+    final_tokens = best_logits.argmax(dim=-1).squeeze(0)
     final_seq_str = decode_seq(final_tokens)
     
     return final_seq_str
 
 def main():
-    # Configuration matching train.py
+    # Configuration
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     DATA_PATH = "datasets/k562_5k.h5ad"
     CHECKPOINT_DIR = "models/model1"
     
-    # Load latest checkpoint
     if not os.path.exists(CHECKPOINT_DIR):
         print(f"Error: Checkpoint directory {CHECKPOINT_DIR} not found.")
         return
@@ -102,23 +128,29 @@ def main():
         print("No checkpoints found.")
         return
         
-    latest_ckpt = checkpoints[0]
+    latest_ckpt = checkpoints[-1]
     ckpt_path = os.path.join(CHECKPOINT_DIR, latest_ckpt)
     print(f"Loading checkpoint: {ckpt_path}")
     
-    # 1. Load Data Context (needed for dimensions and test samples)
+    # 1. Load Data
     if not os.path.exists(DATA_PATH):
         print(f"Error: Data file not found at {DATA_PATH}")
         return
-        
+    
     print(f"Loading data metadata from {DATA_PATH}...")
     adata = sc.read_h5ad(DATA_PATH)
     if hasattr(adata.X, "toarray"):
         adata.X = adata.X.toarray()
+    
+    # --- DATA CLEANING FIX ---
+    # Ensure no NaNs in the input data itself
+    if np.isnan(adata.X).any():
+        print("Warning: Input data contains NaNs. Replacing with zeros to prevent crash.")
+        adata.X = np.nan_to_num(adata.X)
         
     cell_dim = adata.n_vars
     
-    # 2. Initialize Models (Must match train.py architecture)
+    # 2. Initialize Models
     print("Initializing models...")
     dna_model = DNALanguageModel(vocab_size=4, hidden_dim=512, num_layers=4, seq_len=100, input_dim=cell_dim).to(DEVICE)
     vc_model = VirtualCell(cell_dim=cell_dim, seq_len=100).to(DEVICE)
@@ -128,66 +160,54 @@ def main():
     dna_model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Model loaded from epoch {checkpoint['epoch']}")
     
-    # 4. Select a Test Case
-    # Let's pick a random pair from the dataset to optimize
+    # 4. Select Test Case
     idx = np.random.randint(0, len(adata))
     target_row = adata.X[idx]
     
-    # Use global mean as control (similar to dataloader default)
+    # Use global mean as control
     control_row = adata.X.mean(axis=0)
     
-    # Convert to tensors
     control = torch.tensor(control_row, dtype=torch.float32).unsqueeze(0).to(DEVICE)
     target = torch.tensor(target_row, dtype=torch.float32).unsqueeze(0).to(DEVICE)
     
     print(f"Optimization Target: Cell Index {idx}")
     
-    # 5. Run Inference / Optimization
-    optimized_sequence = optimize_sequence(dna_model, vc_model, control, target, steps=50)
+    # Check inputs for NaNs before starting
+    if torch.isnan(control).any() or torch.isnan(target).any():
+        print("Error: Control or Target tensors contain NaNs after loading. Aborting.")
+        return
+
+    # 5. Run Inference
+    optimized_sequence = optimize_sequence(dna_model, vc_model, control, target, steps=50, lr=0.05)
     
     print("\n" + "="*40)
     print("RESULTING DNA SEQUENCE")
     print("="*40)
     print(optimized_sequence)
     print("="*40)
-    print("\nCalculated Metrics (Nature Paper Benchmarks):")
     
+    # Metrics
     scorer = GENEMetrics(device=DEVICE)
-    
-    # 2. Nucleic Acid: Codon Usage
     codon_stats = scorer.calculate_codon_usage(optimized_sequence)
     print(f"2. Codon Usage: GC={codon_stats['GC_Content']*100:.1f}%, Valid ORF={codon_stats['Valid_ORF']}")
     
-    # 3. Protein/Function: TM-Score (Proxied by Foldability/pLDDT)
     print("3. Structural Viability (Querying ESMFold)...")
     fold_stats = scorer.calculate_foldability_esm(optimized_sequence)
     print(f"   pLDDT Score: {fold_stats['pLDDT']} ({fold_stats['Note']})")
     
-    # 4. Protein/Function: Growth Assay (Proxied by Virtual Cell Score)
     func_stats = scorer.calculate_functional_score(vc_model, control, target, optimized_sequence)
     print(f"4. In-Silico Growth/Function:")
     print(f"   MSE (Lower is better): {func_stats['MSE_Loss']:.4f}")
     print(f"   Directionality (1.0 is perfect): {func_stats['Directionality']:.4f}")
 
-    # --- Save Results to File ---
+    # Save
     assets_dir = "datasets/assets"
     if not os.path.exists(assets_dir):
         os.makedirs(assets_dir)
-        
     output_file = os.path.join(assets_dir, "optimized_sequences.txt")
-    
     with open(output_file, "a") as f:
-        f.write(f"--- Optimization Run (Target Index: {idx}) ---\n")
-        f.write(f"Sequence: {optimized_sequence}\n")
-        f.write(f"Metrics:\n")
-        f.write(f"  GC Content: {codon_stats['GC_Content']*100:.1f}%\n")
-        f.write(f"  Valid ORF: {codon_stats['Valid_ORF']}\n")
-        f.write(f"  pLDDT Score: {fold_stats['pLDDT']} ({fold_stats['Note']})\n")
-        f.write(f"  MSE Loss: {func_stats['MSE_Loss']:.4f}\n")
-        f.write(f"  Directionality: {func_stats['Directionality']:.4f}\n")
-        f.write("\n")
-        
-    print(f"\nResults appended to {output_file}")
+        f.write(f"--- Run Index: {idx} ---\nSequence: {optimized_sequence}\nGC: {codon_stats['GC_Content']}\n\n")
+    print(f"Saved to {output_file}")
 
 if __name__ == "__main__":
     main()

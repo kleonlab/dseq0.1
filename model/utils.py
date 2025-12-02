@@ -72,6 +72,10 @@ def steering_loss(predicted_state, target_state):
     
     return loss
 
+def steering_loss(pred, target):
+    # eps=1e-8 prevents division by zero
+    return 1 - torch.nn.functional.cosine_similarity(pred, target, dim=-1, eps=1e-8).mean()
+
 def get_enrichr_genes(library_name, cell_type):
     """
     Fetch genes for a cell type from an Enrichr library.
