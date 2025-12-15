@@ -107,6 +107,44 @@ def main():
     # Preprocessing checks for the dataloader
     if hasattr(adata.X, "toarray"):
         adata.X = adata.X.toarray()
+
+    # --- In main(), before create_dataloaders ---
+
+    if np.isnan(adata.X).any():
+        print("Warning: Raw input contains NaNs. Replacing with zeros.")
+        adata.X = np.nan_to_num(adata.X)
+
+    # --- STEP 2: Check for Negatives (Prevents log1p crash) ---
+    min_val = adata.X.min()
+    max_val = adata.X.max()
+    print(f"Initial Data Range: {min_val:.2f} to {max_val:.2f}")
+
+    if min_val < 0:
+        print(">>> DETECTED NEGATIVE VALUES: Data is likely already scaled.")
+        print(">>> SKIPPING normalize_total and log1p to avoid NaNs.")
+        # Optional: We still re-scale to ensure variance is controlled for the NN
+        # But we don't log-transform negative numbers.
+    else:
+        print(">>> Data is non-negative (likely raw counts). Applying normalization.")
+        
+        # 1. Filter empty cells (prevents divide-by-zero errors)
+        sc.pp.filter_cells(adata, min_counts=1)
+        
+        # 2. Normalize
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
+        
+    # --- STEP 3: Final Scaling (Crucial for Neural Net Stability) ---
+    # We apply this regardless, to ensure inputs are roughly -10 to 10
+    print("Applying final scaling...")
+    sc.pp.scale(adata, max_value=10)
+
+    # Final Check
+    if np.isnan(adata.X).any():
+        print("!!! CRITICAL: NaNs still exist after processing. Replacing with 0.")
+        adata.X = np.nan_to_num(adata.X)
+        
+    print(f"Final Data Range: {adata.X.min():.2f} to {adata.X.max():.2f}")
     
     # Ensure 'Gene Name' column exists (using 'condition' or creating dummy if needed for test)
     if 'Gene Name' not in adata.obs.columns:
@@ -134,7 +172,7 @@ def main():
     
     # Instantiate with correct dimensions
     # Load Pretrained weights immediately upon creation if possible, or after
-    dna_model = DNALanguageModel(vocab_size=4, hidden_dim=512, num_layers=4, seq_len=100, input_dim=cell_dim).to(DEVICE) 
+    dna_model = DNALanguageModel(vocab_size=4, hidden_dim=2048, num_layers=24, seq_len=100, input_dim=cell_dim).to(DEVICE) 
     
     vc_model = VirtualCell(cell_dim=cell_dim, seq_len=100, pretrained_model_path=VC_WEIGHTS_PATH).to(DEVICE) 
     
